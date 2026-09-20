@@ -1,0 +1,86 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Restaurant {
+  id        String     @id @default(cuid())
+  name      String
+  address   String
+  cuisine   String
+  rating    Float
+  imageUrl  String?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  menuItems MenuItem[]
+  orders    Order[]
+
+  @@index([cuisine])
+}
+
+model MenuItem {
+  id           String   @id @default(cuid())
+  name         String
+  description  String
+  price        Int
+  available    Boolean  @default(true)
+  restaurantId String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  orderItems OrderItem[]
+
+  @@index([restaurantId])
+}
+
+model Customer {
+  id        String   @id @default(cuid())
+  name      String
+  email     String   @unique
+  phone     String
+  address   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orders Order[]
+}
+
+model Order {
+  id           String   @id @default(cuid())
+  restaurantId String
+  customerId   String
+  status       String   @default("PENDING")
+  total        Int
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  customer   Customer   @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  items      OrderItem[]
+
+  @@index([restaurantId])
+  @@index([customerId])
+  @@index([status])
+}
+
+model OrderItem {
+  id         String   @id @default(cuid())
+  orderId    String
+  menuItemId String
+  quantity   Int
+  price      Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  order    Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  menuItem MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([menuItemId])
+}
