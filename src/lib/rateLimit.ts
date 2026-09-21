@@ -1,6 +1,20 @@
+import { NextRequest } from "next/server";
 import { RATE_LIMIT } from "./config";
 
-const hits = new Map<string, { count: number; windowStart: number }>();
+const globalForRateLimit = globalThis as unknown as {
+  hits: Map<string, { count: number; windowStart: number }>;
+};
+
+const hits = globalForRateLimit.hits || new Map<string, { count: number; windowStart: number }>();
+globalForRateLimit.hits = hits;
+
+export function getClientIp(request: NextRequest): string {
+  const forwarded = request.headers.get("x-forwarded-for");
+  if (forwarded) {
+    return forwarded.split(",")[0].trim();
+  }
+  return request.headers.get("x-real-ip") || "127.0.0.1";
+}
 
 export function checkRateLimit(ip: string): { allowed: boolean; retryAfter?: number } {
   const now = Date.now();
