@@ -47,7 +47,7 @@ export async function GET(request: NextRequest) {
   const limit = Math.min(limitParam, 100);
 
   const where: Record<string, unknown> = {};
-  if (cuisine) where.cuisine = cuisine;
+  if (cuisine) where.cuisine = { contains: cuisine, mode: "insensitive" };
   if (minRating) where.rating = { gte: parseFloat(minRating) };
 
   const [data, total] = await Promise.all([
