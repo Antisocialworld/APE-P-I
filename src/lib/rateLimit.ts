@@ -10,10 +10,11 @@ globalForRateLimit.hits = hits;
 
 export function getClientIp(request: NextRequest): string {
   const forwarded = request.headers.get("x-forwarded-for");
-  if (forwarded) {
-    return forwarded.split(",")[0].trim();
-  }
-  return request.headers.get("x-real-ip") || "127.0.0.1";
+  const ip = forwarded
+    ? forwarded.split(",")[0].trim()
+    : request.headers.get("x-real-ip") || "127.0.0.1";
+  console.log(`[RATE-LIMIT] ip=${ip} xff=${forwarded} keys=${hits.size}`);
+  return ip;
 }
 
 export function checkRateLimit(ip: string): { allowed: boolean; retryAfter?: number } {
