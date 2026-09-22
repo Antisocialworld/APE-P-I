@@ -1,13 +1,21 @@
 # APE-P-I
 
 A REST API serving realistic food-delivery data: restaurants, menu items,
-orders, customers. Built with Next.js 15, Prisma 6, and PostgreSQL 16,
-designed for eventual deployment to Vercel.
+orders, customers. Built with Next.js 15, Prisma 6, and PostgreSQL 16.
+
+**Live API**: https://ape-p-i.vercel.app
+**Consumer App (Daily Meal)**: https://daily-meal-one.vercel.app
 
 This is the API itself — no auth, no admin panel, no landing page. The
 endpoints are the product.
 
-## Quick Start
+## Production
+
+The API is live at **https://ape-p-i.vercel.app**. All endpoints are
+publicly accessible. A companion consumer app, Daily Meal, is deployed
+at **https://daily-meal-one.vercel.app**.
+
+## Local Development
 
 ```bash
 # 1. Start local Postgres
@@ -19,6 +27,7 @@ npm install
 # 3. Set up environment
 cp .env.example .env
 # Edit .env — set DATABASE_URL to your local Postgres
+# Example: postgresql://USERNAME:PASSWORD@localhost:5433/apepi?schema=public
 
 # 4. Run migrations
 npx prisma migrate dev
@@ -30,7 +39,7 @@ npx prisma db seed
 npm run dev
 ```
 
-API is live at `http://localhost:3000/api/v1/`.
+API is live at `http://localhost:3001/api/v1/`.
 
 ## Endpoints
 
@@ -46,5 +55,6 @@ API is live at `http://localhost:3000/api/v1/`.
 
 ## Further Documentation
 
-Full details — data model, concepts, design decisions, what went wrong,
-what this doesn't handle — are in **[DOCUMENTATION.md](./DOCUMENTATION.md)**.
+Full details — data model, concepts, design decisions, deployment
+history, what went wrong, and what this doesn't handle — are in
+**[DOCUMENTATION.md](./DOCUMENTATION.md)**.

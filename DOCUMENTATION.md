@@ -29,11 +29,20 @@ ORM, PostgreSQL 16 via Docker for local development, and
 
 ## 2. How To Run It
 
-### Prerequisites
+### Production
+
+The API is live at **https://ape-p-i.vercel.app**. A companion consumer
+app (Daily Meal) is live at **https://daily-meal-one.vercel.app**. The
+production database is hosted on Neon and seeded with ~40 restaurants,
+300 customers, 500 orders, and 1,800+ order items.
+
+### Local Development
+
+#### Prerequisites
 - Node.js 18+
 - Docker (for local Postgres)
 
-### Commands
+#### Commands
 
 ```bash
 # Start Postgres via Docker (port 5433 mapped to container's 5432)
@@ -55,13 +64,13 @@ npx prisma db seed
 npm run dev
 ```
 
-The API responds at `http://localhost:3000/api/v1/`.
+The API responds at `http://localhost:3001/api/v1/`.
 
-### Environment Variables
+#### Environment Variables
 
 | Variable | Purpose | Example |
 |----------|---------|---------|
-| `DATABASE_URL` | PostgreSQL connection string | `postgresql://apepi:apepi_dev@localhost:5433/apepi?schema=public` |
+| `DATABASE_URL` | PostgreSQL connection string | `postgresql://USERNAME:PASSWORD@localhost:5433/apepi?schema=public` |
 
 `.env` is gitignored. `.env.example` contains only commented placeholders —
 no real credentials are committed.
@@ -74,7 +83,10 @@ no real credentials are committed.
 
 1. **Rate limit check** (`src/lib/rateLimit.ts`): The client's IP is
    extracted from `x-forwarded-for` or `x-real-ip` headers. The
-   `checkRateLimit()` function checks an in-memory Map. If the IP has
+   `checkRateLimit()` function performs an atomic
+   `INSERT ... ON CONFLICT DO UPDATE` against the `RateLimitEntry`
+   table in PostgreSQL, which both increments the counter and resets
+   the window if expired in a single database operation. If the IP has
    exceeded 100 requests in the current 60-second window, the request
    is rejected immediately with HTTP 429 and a `Retry-After` header.
 
@@ -277,13 +289,16 @@ means the actual number is one line to find and change.
 **Implementation**: `src/lib/config.ts` exports
 `RATE_LIMIT = { requests: 100, windowMs: 60_000 }`. Every route
 handler calls `checkRateLimit(ip)` from `src/lib/rateLimit.ts` at the
-top. The rate limiter uses an in-memory `Map` — simple, no external
-dependencies, sufficient for a single-server deployment.
+top. The rate limiter uses a PostgreSQL-backed atomic
+`INSERT ... ON CONFLICT DO UPDATE` against the `RateLimitEntry` table,
+ensuring correctness under concurrent serverless execution on Vercel.
 
-**What was chosen against**: Redis-backed rate limiting was considered
-but is unnecessary for a single Next.js server. A middleware approach
-(Next.js middleware.ts) was considered but would apply to all routes
-uniformly, making per-route limits harder later.
+**What was chosen against**: An in-memory `Map` was the original
+implementation but failed on Vercel's serverless infrastructure where
+each function invocation has isolated memory. A non-atomic
+database read-then-write was tried next but had race conditions under
+concurrent load. The final atomic UPSERT is the only approach that is
+both serverless-compatible and race-condition-free.
 
 ### Versioned Paths
 
@@ -367,6 +382,144 @@ but `prisma` CLI was at 6.19.3. Major version mismatch.
 `npm install @prisma/client@6 prisma@6`. Both at 6.19.3, generate
 succeeded.
 
+### .env Syntax Bug — Live 500 Error
+
+**Symptom**: After deploying to Vercel and setting the `DATABASE_URL`
+environment variable, every API endpoint returned HTTP 500. The Vercel
+function logs showed a database connection failure.
+
+**Investigation**: Checked the `DATABASE_URL` value in Vercel's
+environment variable settings. The value appeared to be set correctly
+at a glance, but the connection string was malformed — the Prisma
+client could not parse it.
+
+**Cause**: The `.env` file had a comment appended to the same line as
+the `DATABASE_URL` key, like:
+```
+DATABASE_URL="postgresql://user:pass@host/db?sslmode=require" # neon
+```
+When this value was copied into Vercel's environment variables, the
+comment text `# neon` was included as part of the connection string.
+PostgreSQL connection libraries treat `#` as a literal character in the
+URL, not as a comment delimiter, so the driver tried to connect to a
+database named `db?sslmode=require#neon` and failed.
+
+**Fix**: Removed the trailing comment from the environment variable
+value in Vercel's settings. The corrected value contained only the
+connection string with no trailing text.
+
+### CORS Preflight 405 — Consumer App Blocked
+
+**Symptom**: The Daily Meal consumer app, running from a different
+origin (`https://daily-meal-one.vercel.app`), received HTTP 405
+Method Not Allowed on every OPTIONS preflight request. The browser
+blocked all API calls.
+
+**Investigation**: Opened the browser's network tab and saw the
+preflight OPTIONS requests returning 405. The route handlers in
+`src/app/api/v1/` only defined `GET`, `POST`, `PATCH`, and `DELETE`
+— they did not handle `OPTIONS`. Next.js App Router returns 405 for
+unhandled methods by default.
+
+**Cause**: CORS preflight requests use the OPTIONS HTTP method. Without
+explicit handling, Next.js routed OPTIONS requests to the route
+handlers, which rejected them with 405 before any CORS headers could
+be added. The browser requires CORS headers on the preflight response
+before it will send the actual request.
+
+**Fix**: Added `src/middleware.ts` that intercepts all `/api/*` routes.
+For OPTIONS requests, it returns a 204 with `Access-Control-Allow-Origin: *`
+and the other required CORS headers. For all other methods, it passes
+the request through while still attaching the CORS headers to the
+response.
+
+### Rate-Limiter Concurrency Failure on Vercel Serverless
+
+**Symptom**: Under concurrent load (120 simultaneous requests fired by
+`test-ratelimit.js`), the rate limiter failed to enforce the
+100-request limit. Requests that should have been rejected with 429
+were getting through with 200.
+
+**Investigation**: The original in-memory `Map` in `src/lib/rateLimit.ts`
+worked perfectly in local development (single Node.js process) but
+failed on Vercel because each serverless function invocation has its own
+isolated memory space. Two concurrent requests hitting different function
+instances would each see their own empty Map, neither knowing about the
+other's count.
+
+**Cause — three layers of the same problem**:
+
+*Layer 1 — In-memory Map*: The original design stored per-IP counters
+in a JavaScript `Map`. This is correct for a single persistent process
+but fundamentally broken on serverless: each function instance is a
+separate V8 isolate with its own memory. Under concurrency, the limit
+was effectively multiplied by the number of concurrent instances.
+
+*Layer 2 — Non-atomic database read-then-write*: Moving the counter to
+PostgreSQL fixed the cross-instance problem but introduced a race
+condition. Two concurrent requests could both SELECT count=99, both see
+it under the limit, and both INSERT an incremented value — allowing
+101+ requests through. The gap between the SELECT and the UPDATE is
+the vulnerability.
+
+*Layer 3 — Atomic database UPSERT*: Replaced the separate SELECT +
+UPDATE with a single `INSERT ... ON CONFLICT DO UPDATE` statement that
+atomically increments the counter (or resets it if the window has
+expired) and returns the final count via `RETURNING`. This is a single
+database operation — no race condition is possible regardless of
+concurrency level.
+
+**Fix**: The final `src/lib/rateLimit.ts` uses Prisma's
+`$queryRaw` to execute the atomic UPSERT directly against PostgreSQL.
+The `RateLimitEntry` table (with a unique index on `key`) stores
+per-IP counters. Verified by `test-ratelimit.js`, which fires 120
+concurrent requests and confirms exactly 100 succeed (200) and 20 are
+rejected (429).
+
+### Migration Drift — RateLimitEntry Without a Migration File
+
+**Symptom**: After deployment, `npx prisma migrate status` reported
+"Database schema is up to date" with only one migration found
+(`20260920161242_init`), but the actual database contained a
+`RateLimitEntry` table that was not in the init migration's SQL.
+
+**Investigation**: Queried `pg_tables` and confirmed `RateLimitEntry`
+existed with the correct columns (`id`, `key`, `count`, `windowStart`)
+and indexes (PK, unique on `key`, btree on `key`). Queried
+`_prisma_migrations` and confirmed only one migration record existed.
+The table had been added to the database directly — likely via a
+`prisma migrate dev` that was applied but whose migration file was
+never committed to the repository.
+
+**Cause**: The `RateLimitEntry` table was created in the production
+database (probably during an uncommitted `migrate dev` run) without
+leaving a corresponding migration file in `prisma/migrations/`. This
+left Prisma's migration history out of sync with the actual database
+schema. While Prisma's status check happened to report "up to date"
+(because the migration files and `_prisma_migrations` table were in
+sync with each other, even though both were missing the
+`RateLimitEntry` step), any future `migrate dev` or `migrate reset`
+could have caused unexpected behavior or data loss.
+
+**Fix**: Baselined the missing migration safely:
+1. Created the migration directory
+   `prisma/migrations/20260921000000_add_rate_limit_entry/` with a
+   `migration.sql` file containing the exact DDL for the existing table
+   (`CREATE TABLE`, unique index, btree index) — derived from the live
+   schema via `prisma migrate diff --from-schema-datasource` (which
+   confirmed zero diff between the live DB and the schema).
+2. Ran `npx prisma migrate resolve --applied 20260921000000_add_rate_limit_entry`
+   to record the migration as already applied in `_prisma_migrations`,
+   without executing any SQL against the database.
+3. Verified with `npx prisma migrate status` that both migrations are
+   now tracked and the schema is up to date.
+4. Verified via direct queries that all existing data (40 restaurants,
+   300 customers, 552 menu items, 500 orders, 1,806 order items,
+   3 rate-limit entries) was completely unchanged.
+
+No destructive operations (`migrate dev`, `migrate reset`) were run
+against the production database at any point.
+
 ---
 
 ## 7. What This Slice Does Not Handle
@@ -378,13 +531,9 @@ particular, are additions worth noting honestly.
 
 ### Not yet done
 
-- **Deployment to Vercel**: The API runs locally but has not been
-  deployed. A managed Postgres (Vercel Postgres, Neon, or Supabase)
-  has not been provisioned. The seed script has not been run against
-  production.
-
 - **Consumer UI**: The brief calls for a minimal consumer app that
-  calls the live deployed URL. This has not been built yet.
+  calls the live deployed URL. A companion app (Daily Meal) has been
+  built and deployed at https://daily-meal-one.vercel.app.
 
 ### Scope limits by design
 
@@ -397,11 +546,11 @@ particular, are additions worth noting honestly.
   tradeoffs (slower on large offsets, possible duplicate/skipped rows)
   are accepted.
 
-- **In-memory rate limiting only**: The rate limiter uses a JavaScript
-  `Map` in `src/lib/rateLimit.ts`. This works for a single-server
-  deployment but would not survive a serverless/edge deployment without
-  an external store (Redis, etc.). For Vercel's serverless functions,
-  this would need to be replaced.
+- **Database-backed rate limiting**: The rate limiter uses a PostgreSQL
+  `RateLimitEntry` table with atomic `INSERT ... ON CONFLICT DO UPDATE`.
+  This works correctly on Vercel's serverless infrastructure. A
+  Redis-backed approach would be more performant at scale but is
+  unnecessary for this deployment.
 
 - **Single consumer app only**: The brief requires one consumer, not
   a generic client SDK or multiple consumers.
