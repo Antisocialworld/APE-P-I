@@ -6,7 +6,7 @@ const ALLOWED_SORT_FIELDS = ["name", "cuisine", "rating", "createdAt"];
 const ALLOWED_FILTERS = ["cuisine", "minRating"];
 
 export async function GET(request: NextRequest) {
-  const rl = checkRateLimit(getClientIp(request));
+  const rl = await checkRateLimit(getClientIp(request));
   if (!rl.allowed) {
     return NextResponse.json(
       { error: { code: "RATE_LIMITED", message: "Too many requests" } },

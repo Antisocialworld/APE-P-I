@@ -8,7 +8,7 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const rl = checkRateLimit(getClientIp(request));
+  const rl = await checkRateLimit(getClientIp(request));
   if (!rl.allowed) {
     return NextResponse.json(
       { error: { code: "RATE_LIMITED", message: "Too many requests" } },

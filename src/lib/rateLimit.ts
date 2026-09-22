@@ -1,37 +1,39 @@
 import { NextRequest } from "next/server";
 import { RATE_LIMIT } from "./config";
-
-const globalForRateLimit = globalThis as unknown as {
-  hits: Map<string, { count: number; windowStart: number }>;
-};
-
-const hits = globalForRateLimit.hits || new Map<string, { count: number; windowStart: number }>();
-globalForRateLimit.hits = hits;
+import { prisma } from "./prisma";
 
 export function getClientIp(request: NextRequest): string {
   const forwarded = request.headers.get("x-forwarded-for");
-  const ip = forwarded
-    ? forwarded.split(",")[0].trim()
-    : request.headers.get("x-real-ip") || "127.0.0.1";
-  console.log(`[RATE-LIMIT] ip=${ip} xff=${forwarded} keys=${hits.size}`);
-  return ip;
+  if (forwarded) {
+    return forwarded.split(",")[0].trim();
+  }
+  return request.headers.get("x-real-ip") || "127.0.0.1";
 }
 
-export function checkRateLimit(ip: string): { allowed: boolean; retryAfter?: number } {
-  const now = Date.now();
-  const entry = hits.get(ip);
+export async function checkRateLimit(ip: string): Promise<{ allowed: boolean; retryAfter?: number }> {
+  const now = new Date();
+  const windowStart = new Date(now.getTime() - RATE_LIMIT.windowMs);
 
-  if (!entry || now - entry.windowStart > RATE_LIMIT.windowMs) {
-    hits.set(ip, { count: 1, windowStart: now });
+  const existing = await prisma.rateLimitEntry.findUnique({ where: { key: ip } });
+
+  if (!existing || existing.windowStart < windowStart) {
+    await prisma.rateLimitEntry.upsert({
+      where: { key: ip },
+      create: { key: ip, count: 1, windowStart: now },
+      update: { count: 1, windowStart: now },
+    });
     return { allowed: true };
   }
 
-  entry.count++;
-
-  if (entry.count > RATE_LIMIT.requests) {
-    const retryAfter = Math.ceil((entry.windowStart + RATE_LIMIT.windowMs - now) / 1000);
-    return { allowed: false, retryAfter };
+  if (existing.count >= RATE_LIMIT.requests) {
+    const retryAfter = Math.ceil((existing.windowStart.getTime() + RATE_LIMIT.windowMs - now.getTime()) / 1000);
+    return { allowed: false, retryAfter: Math.max(retryAfter, 1) };
   }
+
+  await prisma.rateLimitEntry.update({
+    where: { key: ip },
+    data: { count: { increment: 1 } },
+  });
 
   return { allowed: true };
 }

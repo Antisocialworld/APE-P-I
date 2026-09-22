@@ -69,6 +69,15 @@ model Order {
   @@index([status])
 }
 
+model RateLimitEntry {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  count       Int      @default(0)
+  windowStart DateTime
+
+  @@index([key])
+}
+
 model OrderItem {
   id         String   @id @default(cuid())
   orderId    String
