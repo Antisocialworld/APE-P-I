@@ -12,28 +12,32 @@ export function getClientIp(request: NextRequest): string {
 
 export async function checkRateLimit(ip: string): Promise<{ allowed: boolean; retryAfter?: number }> {
   const now = new Date();
-  const windowStartMs = now.getTime() - RATE_LIMIT.windowMs;
+  const windowStart = new Date(now.getTime() - RATE_LIMIT.windowMs);
 
-  const existing = await prisma.rateLimitEntry.findUnique({ where: { key: ip } });
-
-  if (!existing || existing.windowStart.getTime() < windowStartMs) {
-    await prisma.rateLimitEntry.upsert({
-      where: { key: ip },
-      create: { key: ip, count: 1, windowStart: now },
-      update: { count: 1, windowStart: now },
-    });
-    return { allowed: true };
-  }
-
-  const rows = await prisma.$queryRaw<{ count: bigint }[]>`
-    UPDATE "RateLimitEntry"
-    SET count = count + 1
-    WHERE key = ${ip} AND count < ${RATE_LIMIT.requests}
-    RETURNING count
+  const rows = await prisma.$queryRaw<{ count: bigint; window_start: Date }[]>`
+    INSERT INTO "RateLimitEntry" (id, key, count, "windowStart")
+    VALUES (gen_random_uuid(), ${ip}, 1, ${now})
+    ON CONFLICT (key) DO UPDATE
+    SET count = CASE
+      WHEN "RateLimitEntry"."windowStart" < ${windowStart} THEN 1
+      ELSE "RateLimitEntry".count + 1
+    END,
+    "windowStart" = CASE
+      WHEN "RateLimitEntry"."windowStart" < ${windowStart} THEN ${now}
+      ELSE "RateLimitEntry"."windowStart"
+    END
+    RETURNING count, "windowStart" as window_start
   `;
 
   if (rows.length === 0) {
-    const retryAfter = Math.ceil((existing.windowStart.getTime() + RATE_LIMIT.windowMs - now.getTime()) / 1000);
+    return { allowed: true };
+  }
+
+  const current = Number(rows[0].count);
+
+  if (current > RATE_LIMIT.requests) {
+    const ws = rows[0].window_start.getTime();
+    const retryAfter = Math.ceil((ws + RATE_LIMIT.windowMs - now.getTime()) / 1000);
     return { allowed: false, retryAfter: Math.max(retryAfter, 1) };
   }
 
