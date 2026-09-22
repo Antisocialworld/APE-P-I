@@ -12,11 +12,11 @@ export function getClientIp(request: NextRequest): string {
 
 export async function checkRateLimit(ip: string): Promise<{ allowed: boolean; retryAfter?: number }> {
   const now = new Date();
-  const windowStart = new Date(now.getTime() - RATE_LIMIT.windowMs);
+  const windowStartMs = now.getTime() - RATE_LIMIT.windowMs;
 
   const existing = await prisma.rateLimitEntry.findUnique({ where: { key: ip } });
 
-  if (!existing || existing.windowStart < windowStart) {
+  if (!existing || existing.windowStart.getTime() < windowStartMs) {
     await prisma.rateLimitEntry.upsert({
       where: { key: ip },
       create: { key: ip, count: 1, windowStart: now },
@@ -25,15 +25,17 @@ export async function checkRateLimit(ip: string): Promise<{ allowed: boolean; re
     return { allowed: true };
   }
 
-  if (existing.count >= RATE_LIMIT.requests) {
+  const rows = await prisma.$queryRaw<{ count: bigint }[]>`
+    UPDATE "RateLimitEntry"
+    SET count = count + 1
+    WHERE key = ${ip} AND count < ${RATE_LIMIT.requests}
+    RETURNING count
+  `;
+
+  if (rows.length === 0) {
     const retryAfter = Math.ceil((existing.windowStart.getTime() + RATE_LIMIT.windowMs - now.getTime()) / 1000);
     return { allowed: false, retryAfter: Math.max(retryAfter, 1) };
   }
-
-  await prisma.rateLimitEntry.update({
-    where: { key: ip },
-    data: { count: { increment: 1 } },
-  });
 
   return { allowed: true };
 }
