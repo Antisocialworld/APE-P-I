@@ -1,6 +1,6 @@
-const http = require("http");
+const http = require("https");
 
-const URL = "http://localhost:3001/api/v1/restaurants";
+const URL = "https://ape-p-i.vercel.app/api/v1/restaurants";
 const TOTAL = 120;
 
 let done = 0;
@@ -26,7 +26,7 @@ function fire() {
 }
 
 async function main() {
-  const batchSize = 30;
+  const batchSize = 120;
   for (let batch = 0; batch < Math.ceil(TOTAL / batchSize); batch++) {
     const promises = [];
     const count = Math.min(batchSize, TOTAL - batch * batchSize);
